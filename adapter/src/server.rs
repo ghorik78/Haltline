@@ -655,10 +655,8 @@ mod tests {
             "serverArgs": ["-d2"]
         }));
         let cmd = server_command(&c, 3333).unwrap().unwrap();
-        assert_eq!(
-            cmd.args[..2],
-            ["-s".to_string(), "/opt/scripts".to_string()]
-        );
+        assert_eq!(cmd.args[0], "-s");
+        assert_eq!(cmd.args[1], c.resolve("/opt/scripts").to_string_lossy());
         let a = cmd.args.join(" ");
         assert!(a.contains("-f interface/stlink.cfg -f target/stm32g4x.cfg"));
         assert!(a.ends_with("-c init -d2"));

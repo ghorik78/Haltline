@@ -383,7 +383,7 @@ fn parse_children(parent: Node, base_address: u64, props: Props) -> Result<Vec<R
                     Some(f) => parse_fields(f, own_props.access)?,
                     None => Vec::new(),
                 };
-                fields.sort_by(|a, b| b.lsb.cmp(&a.lsb));
+                fields.sort_by_key(|f| std::cmp::Reverse(f.lsb));
                 out.push(RegisterNode::Register(Register {
                     name: instance_name,
                     description: description.clone(),
