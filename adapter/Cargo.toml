@@ -1,0 +1,28 @@
+[package]
+name = "haltline-dap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Debug Adapter Protocol server for STM32 / ARM Cortex-M over GDB/MI"
+repository = "https://github.com/ghorik78/Haltline"
+
+[lib]
+name = "haltline_dap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "haltline-dap"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+roxmltree = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,18 @@
+// Open this folder in Zed to try Haltline without a board:
+// needs arm-none-eabi-gcc, make, qemu-system-arm and gdb-multiarch (or arm-none-eabi-gdb).
+[
+  {
+    "label": "Test firmware (QEMU, STM32F405)",
+    "adapter": "Haltline",
+    "request": "launch",
+    "build": {
+      "command": "make",
+      "args": ["firmware.elf"],
+      "cwd": "$ZED_WORKTREE_ROOT"
+    },
+    "serverType": "qemu",
+    "machine": "netduinoplus2",
+    "executable": "firmware.elf",
+    "svdFile": "stm32f405-test.svd"
+  }
+]

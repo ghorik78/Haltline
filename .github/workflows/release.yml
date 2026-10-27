@@ -1,0 +1,129 @@
+# Builds and publishes a release when a version tag (vX.Y.Z) is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Assets: the prebuilt Zed extension, haltline-dap for every platform,
+# install scripts and SHA256SUMS.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    name: Check versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match extension.toml and both Cargo.toml files
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for f in extension.toml Cargo.toml adapter/Cargo.toml; do
+            v=$(sed -n 's/^version = "\(.*\)"/\1/p' "$f" | head -n1)
+            if [ "$v" != "$tag" ]; then
+              echo "::error file=$f::version $v does not match tag $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+
+  test:
+    name: Tests
+    needs: check-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi gdb-multiarch qemu-system-arm
+      - run: cargo test --workspace --locked
+        env:
+          HALTLINE_E2E: "1"
+
+  adapter:
+    name: haltline-dap (${{ matrix.target }})
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p haltline-dap --target ${{ matrix.target }}
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -C target/${{ matrix.target }}/release -czf dist/haltline-dap-${{ matrix.target }}.tar.gz haltline-dap
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path target/${{ matrix.target }}/release/haltline-dap.exe -DestinationPath dist/haltline-dap-${{ matrix.target }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adapter-${{ matrix.target }}
+          path: dist/*
+
+  extension:
+    name: Zed extension
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/package-extension.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension
+          path: dist/haltline-zed-extension.*
+
+  publish:
+    name: Publish the GitHub release
+    needs: [test, adapter, extension]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Add install scripts and checksums
+        run: |
+          cp scripts/install.sh scripts/install.ps1 dist/
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "Haltline $tag" --generate-notes
+          fi

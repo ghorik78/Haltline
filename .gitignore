@@ -1,0 +1,5 @@
+/target
+/extension.wasm
+/dist
+*.elf
+*.o

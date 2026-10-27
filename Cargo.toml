@@ -1,0 +1,26 @@
+[package]
+name = "haltline-zed"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Zed extension: STM32 / ARM Cortex-M debugging through GDB"
+repository = "https://github.com/ghorik78/Haltline"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+zed_extension_api = "0.7.0"
+
+[workspace]
+members = ["adapter"]
+resolver = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"

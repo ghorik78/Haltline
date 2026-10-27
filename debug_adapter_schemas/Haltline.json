@@ -1,0 +1,341 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Haltline (STM32 / Cortex-M) debug configuration",
+  "type": "object",
+  "required": [
+    "request"
+  ],
+  "properties": {
+    "request": {
+      "type": "string",
+      "enum": [
+        "launch",
+        "attach"
+      ],
+      "description": "`launch` flashes the firmware and resets the target; `attach` connects to a running target without resetting it."
+    },
+    "executable": {
+      "type": "string",
+      "description": "ELF file of the firmware (with debug info). Relative paths are resolved against `cwd`. Example: \"build/firmware.elf\"."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory for relative paths and the GDB server. Defaults to the project root."
+    },
+    "serverType": {
+      "type": "string",
+      "enum": [
+        "openocd",
+        "stlink",
+        "stutil",
+        "pyocd",
+        "jlink",
+        "qemu",
+        "external"
+      ],
+      "default": "openocd",
+      "description": "GDB server to start: OpenOCD, ST-LINK_gdbserver (STM32CubeIDE/CubeCLT), st-util, pyOCD, SEGGER J-Link, QEMU, or `external` for an already running server (see `gdbTarget`)."
+    },
+    "serverPath": {
+      "type": "string",
+      "description": "Path to the GDB server program (default: found in PATH / standard install locations)."
+    },
+    "serverArgs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extra command line arguments for the GDB server."
+    },
+    "serverEnv": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Extra environment variables for the GDB server."
+    },
+    "serverReadyText": {
+      "type": "string",
+      "description": "Text in the server output that means it accepts GDB connections (overrides the built-in detection)."
+    },
+    "serverTimeout": {
+      "type": "integer",
+      "default": 15000,
+      "description": "Milliseconds to wait for the GDB server to become ready."
+    },
+    "gdbTarget": {
+      "type": "string",
+      "description": "host:port of the GDB server; required for `serverType: external`, e.g. \"localhost:3333\"."
+    },
+    "port": {
+      "type": "integer",
+      "description": "GDB port for a server started by Haltline (default: a free port)."
+    },
+    "gdbPath": {
+      "type": "string",
+      "description": "GDB to use (default: arm-none-eabi-gdb or gdb-multiarch from PATH or the STM32CubeCLT / Arm GNU toolchain folders)."
+    },
+    "gdbArgs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extra GDB command line arguments."
+    },
+    "configFiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "OpenOCD configuration files (-f), e.g. [\"interface/stlink.cfg\", \"target/stm32f4x.cfg\"]. Optional when `device` is a known STM32."
+    },
+    "searchDir": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "OpenOCD script search directories (-s)."
+    },
+    "openocdCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extra OpenOCD commands (-c), run after the configuration files."
+    },
+    "probe": {
+      "type": "string",
+      "enum": [
+        "stlink",
+        "stlink-dap",
+        "jlink",
+        "cmsis-dap",
+        "daplink",
+        "picoprobe"
+      ],
+      "default": "stlink",
+      "description": "Debug probe, used to choose the OpenOCD interface file when `configFiles` is not set."
+    },
+    "interface": {
+      "type": "string",
+      "enum": [
+        "swd",
+        "jtag"
+      ],
+      "default": "swd",
+      "description": "Debug transport: SWD (default) or JTAG."
+    },
+    "speed": {
+      "type": "integer",
+      "description": "Debug adapter clock in kHz."
+    },
+    "device": {
+      "type": "string",
+      "description": "Device part number, e.g. \"STM32F407VG\". Used for the OpenOCD target file, J-Link and pyOCD."
+    },
+    "serialNumber": {
+      "type": "string",
+      "description": "Serial number of the probe to use when several are connected."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "pyOCD target name (default: lower-cased `device`)."
+    },
+    "machine": {
+      "type": "string",
+      "default": "netduinoplus2",
+      "description": "QEMU machine (-M), e.g. netduinoplus2, olimex-stm32-h405, stm32vldiscovery."
+    },
+    "stm32cubeprogrammer": {
+      "type": "string",
+      "description": "STM32CubeProgrammer `bin` directory, needed by ST-LINK_gdbserver (found automatically in STM32CubeCLT)."
+    },
+    "rtos": {
+      "type": "string",
+      "description": "OpenOCD RTOS awareness (`auto`, `FreeRTOS`, `Zephyr`, ...): tasks are shown as threads."
+    },
+    "semihosting": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable semihosting (printf to the debug console through the debugger) in OpenOCD, st-util, pyOCD or QEMU."
+    },
+    "svdFile": {
+      "type": "string",
+      "description": "CMSIS-SVD file of the MCU; enables the Peripherals view (registers and bit fields). Example: \"STM32F407.svd\"."
+    },
+    "runToEntryPoint": {
+      "type": "string",
+      "default": "main",
+      "description": "Function to run to after launch and restart; empty string to disable."
+    },
+    "stopOnEntry": {
+      "type": "boolean",
+      "default": false,
+      "description": "Stop right after reset (in Reset_Handler) instead of running to `runToEntryPoint`."
+    },
+    "loadImage": {
+      "type": "boolean",
+      "default": true,
+      "description": "Flash `executable` on launch (default: true, false for QEMU)."
+    },
+    "loadTimeout": {
+      "type": "integer",
+      "default": 180000,
+      "description": "Milliseconds allowed for flashing."
+    },
+    "continueOnAttach": {
+      "type": "boolean",
+      "default": false,
+      "description": "Let the target keep running after attaching."
+    },
+    "preLaunchCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "GDB commands run after connecting, before reset and flashing."
+    },
+    "postLaunchCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "GDB commands run after flashing and reset."
+    },
+    "overrideLaunchCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Replace the whole launch sequence (reset, load, reset) with these GDB commands."
+    },
+    "preAttachCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "GDB commands run after connecting in attach mode."
+    },
+    "postAttachCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "GDB commands run at the end of attaching."
+    },
+    "overrideAttachCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Replace the attach sequence with these GDB commands."
+    },
+    "preRestartCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "GDB commands run before the reset on restart."
+    },
+    "postRestartCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "GDB commands run after the reset on restart."
+    },
+    "overrideRestartCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Replace the restart sequence with these GDB commands."
+    },
+    "resetCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Commands that reset and halt the target (default depends on the server, e.g. `monitor reset halt`)."
+    },
+    "reloadOnRestart": {
+      "type": "boolean",
+      "default": false,
+      "description": "Flash the executable again when the session is restarted (useful after rebuilding)."
+    },
+    "forceHardwareBreakpoints": {
+      "type": "boolean",
+      "default": false,
+      "description": "Always use hardware breakpoints."
+    },
+    "showDisassembly": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "default": "auto",
+      "description": "When the current frame is shown as disassembly: `auto` = when stepping by instruction (Zed setting debugger.stepping_granularity = \"instruction\") or when there is no source."
+    },
+    "hexValues": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show variable values in hexadecimal (toggle at runtime with `:hex` in the debug console)."
+    },
+    "showGlobals": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show the Globals and Static scopes."
+    },
+    "debugOutput": {
+      "type": "boolean",
+      "default": false,
+      "description": "Log every GDB/MI command and response to the debug console."
+    },
+    "sourceFileMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Source path substitutions, e.g. {\"/build/src\": \"${ZED_WORKTREE_ROOT}/src\"}."
+    },
+    "adapterPath": {
+      "type": "string",
+      "description": "Use this haltline-dap binary instead of the downloaded one."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "request": {
+            "const": "launch"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "executable"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "serverType": {
+            "const": "external"
+          }
+        },
+        "required": [
+          "serverType"
+        ]
+      },
+      "then": {
+        "required": [
+          "gdbTarget"
+        ]
+      }
+    }
+  ]
+}

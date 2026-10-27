@@ -1,0 +1,10 @@
+id = "haltline"
+name = "Haltline: STM32 Debugger"
+description = "Debug STM32 / ARM Cortex-M firmware: registers, SVD peripherals, disassembly, breakpoints and watchpoints over OpenOCD, ST-LINK, pyOCD, J-Link or QEMU."
+version = "0.1.0"
+schema_version = 1
+authors = ["p.markevich"]
+repository = "https://github.com/ghorik78/Haltline"
+
+# The configuration schema is debug_adapter_schemas/Haltline.json.
+[debug_adapters.Haltline]
