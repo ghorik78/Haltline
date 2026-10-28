@@ -14,7 +14,7 @@ rm -rf dist/stage
 mkdir -p "$stage/debug_adapter_schemas"
 cp target/wasm32-wasip2/release/haltline_zed.wasm "$stage/extension.wasm"
 cp debug_adapter_schemas/Haltline.json "$stage/debug_adapter_schemas/"
-cp LICENSE README.md "$stage/"
+cp LICENSE README.md README.ru.md "$stage/"
 # Zed records the library kind and API version in installed manifests.
 {
     cat extension.toml
