@@ -24,6 +24,7 @@ Haltline adds a firmware debugger to Zed, similar to Cortex-Debug in VS Code. It
 - [Updating](#updating)
 - [Quick start](#quick-start)
 - [Configuration examples](#configuration-examples)
+- [RTOS threads (FreeRTOS, Zephyr, NuttX)](#rtos-threads-freertos-zephyr-nuttx)
 - [Configuration reference](#configuration-reference)
 - [Using the debugger](#using-the-debugger)
 - [Troubleshooting](#troubleshooting)
@@ -45,7 +46,7 @@ Haltline adds a firmware debugger to Zed, similar to Cortex-Debug in VS Code. It
 | **Call stack** | Includes frames across exception entry (`<exception entry>`) |
 | **Variables** | Locals, statics and globals; structs, arrays (split into ranges), pointers; watch expressions, hover, value editing, hex display |
 | **Memory** | Viewing and writing memory in Zed's Memory view |
-| **RTOS** | FreeRTOS and Zephyr tasks shown as threads (through OpenOCD) |
+| **RTOS** | FreeRTOS, Zephyr and NuttX tasks shown as threads (through OpenOCD, pyOCD or J-Link), see [RTOS threads](#rtos-threads-freertos-zephyr-nuttx) |
 | **Semihosting** | `printf` output in the debug console |
 
 ## How it works
@@ -343,6 +344,96 @@ With `reloadOnRestart`, the **Restart** button flashes the rebuilt firmware agai
 There is a ready-made example in [`adapter/tests/firmware`](adapter/tests/firmware). Open that folder in Zed and start **Test firmware (QEMU, STM32F405)**. It needs `arm-none-eabi-gcc`, `make`, `qemu-system-arm` and an ARM GDB.
 </details>
 
+## RTOS threads (FreeRTOS, Zephyr, NuttX)
+
+Haltline can show RTOS tasks as threads. Pick a task in the thread list of the Debug panel to see its call stack and variables. The task list is built by the GDB server, so you turn it on in the server settings. The firmware must also export the symbols the server looks for.
+
+| GDB server | How to turn it on | FreeRTOS | Zephyr | NuttX |
+|---|---|---|---|---|
+| OpenOCD | `"rtos"` setting | ✅ | ✅ | ✅ OpenOCD built from git only |
+| pyOCD | on by default | ✅ | ✅ | — |
+| J-Link | RTOS plugin in `serverArgs` | ✅ plugin bundled with J-Link | ✅ plugin bundled with J-Link | ✅ plugin from the NuttX sources |
+| ST-LINK GDB server, st-util, QEMU | not supported | — | — | — |
+
+General notes:
+
+* The OpenOCD RTOS names are case-sensitive: `FreeRTOS`, `Zephyr`, `nuttx`. With `"auto"`, OpenOCD tries every RTOS it knows.
+* Tasks appear once the scheduler has started. Before that, for example while the program is stopped at `main`, there is a single thread.
+* If no tasks appear, look at the GDB server messages in the debug console. OpenOCD names the symbol that is missing.
+
+### FreeRTOS
+
+```json
+{
+  "label": "FreeRTOS",
+  "adapter": "Haltline",
+  "request": "launch",
+  "executable": "build/app.elf",
+  "device": "STM32F407VG",
+  "rtos": "FreeRTOS"
+}
+```
+
+OpenOCD needs the `uxTopUsedPriority` variable. Recent FreeRTOS-Kernel versions define it, but older ones do not, for example the FreeRTOS bundled with older STM32CubeMX packages. If the console shows `FreeRTOS: uxTopUsedPriority is not defined`, add this file to the project:
+
+```c
+/* freertos_openocd.c */
+#include "FreeRTOS.h"
+
+const int __attribute__((used)) uxTopUsedPriority = configMAX_PRIORITIES - 1;
+```
+
+If you link with `--gc-sections`, also add `-Wl,--undefined=uxTopUsedPriority` to the linker flags so the variable is kept.
+
+### Zephyr
+
+Add this to `prj.conf`:
+
+```ini
+CONFIG_DEBUG_THREAD_INFO=y
+```
+
+This option exports the thread information that debuggers need, and turns on thread names. Then set `"rtos": "Zephyr"` (OpenOCD). The executable is `build/zephyr/zephyr.elf`.
+
+### NuttX
+
+* **OpenOCD built from git is required.** The latest OpenOCD release, 0.12.0 (the one in Linux distributions), has outdated NuttX support that does not work with current NuttX. Builds from git print a version like `0.12.0+dev-…` in `openocd --version`. Point `serverPath` to such a build.
+* **NuttX must export `g_tcbinfo`.** NuttX 12.4 and newer always does this on Cortex-M. Older versions, for example 12.0, need `CONFIG_DEBUG_TCBINFO=y`. Build with `CONFIG_DEBUG_SYMBOLS=y` to get debug information.
+
+```json
+{
+  "label": "NuttX",
+  "adapter": "Haltline",
+  "request": "launch",
+  "executable": "nuttx/nuttx",
+  "device": "STM32F407VG",
+  "rtos": "nuttx",
+  "serverPath": "/opt/openocd-git/bin/openocd"
+}
+```
+
+### pyOCD
+
+pyOCD finds FreeRTOS and Zephyr by itself, so `"serverType": "pyocd"` needs no extra settings. The firmware requirements are the same: Zephyr needs `CONFIG_DEBUG_THREAD_INFO=y`.
+
+### J-Link
+
+J-Link loads RTOS support from plugins, which are passed with `-rtos`. Plugins for FreeRTOS and Zephyr come with the J-Link software:
+
+```json
+{
+  "label": "J-Link + FreeRTOS",
+  "adapter": "Haltline",
+  "request": "launch",
+  "serverType": "jlink",
+  "device": "STM32F407VG",
+  "executable": "build/app.elf",
+  "serverArgs": ["-rtos", "GDBServer/RTOSPlugin_FreeRTOS"]
+}
+```
+
+For Zephyr, use `GDBServer/RTOSPlugin_Zephyr`; it also needs `CONFIG_DEBUG_THREAD_INFO=y`. For NuttX, build the plugin from the NuttX source tree with `make -C tools -f Makefile.host jlink-nuttx`, and pass the path to it: `"serverArgs": ["-rtos", "/path/to/nuttx/tools/jlink-nuttx.so"]` (`.dylib` on macOS, `.dll` on Windows).
+
 ## Configuration reference
 
 The full schema with descriptions is in [`debug_adapter_schemas/Haltline.json`](debug_adapter_schemas/Haltline.json). Relative paths are resolved against `cwd`, which is the project root by default.
@@ -383,7 +474,7 @@ The full schema with descriptions is in [`debug_adapter_schemas/Haltline.json`](
 | `configFiles` | from `device` | OpenOCD config files (`-f`) |
 | `searchDir` | `[]` | OpenOCD script folders (`-s`) |
 | `openocdCommands` | `[]` | Extra OpenOCD commands (`-c`) |
-| `rtos` | — | OpenOCD RTOS support: `auto`, `FreeRTOS`, `Zephyr`, … |
+| `rtos` | — | OpenOCD RTOS support: `FreeRTOS`, `Zephyr`, `nuttx`, `auto`, … (case-sensitive), see [RTOS threads](#rtos-threads-freertos-zephyr-nuttx) |
 | `targetId` | from `device` | pyOCD target name |
 | `machine` | `netduinoplus2` | QEMU machine |
 | `stm32cubeprogrammer` | auto | STM32CubeProgrammer `bin` folder, for the ST-LINK GDB server |

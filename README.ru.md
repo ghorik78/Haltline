@@ -24,6 +24,7 @@ Haltline добавляет в Zed отладчик прошивок, похож
 - [Обновление](#обновление)
 - [Быстрый старт](#быстрый-старт)
 - [Примеры настроек](#примеры-настроек)
+- [Задачи RTOS (FreeRTOS, Zephyr, NuttX)](#задачи-rtos-freertos-zephyr-nuttx)
 - [Справочник настроек](#справочник-настроек)
 - [Работа с отладчиком](#работа-с-отладчиком)
 - [Решение проблем](#решение-проблем)
@@ -45,7 +46,7 @@ Haltline добавляет в Zed отладчик прошивок, похож
 | **Стек вызовов** | В том числе через границу прерывания (`<exception entry>`) |
 | **Переменные** | Локальные, статические и глобальные; структуры, массивы (большие делятся на диапазоны), указатели; watch, подсказки при наведении, изменение значений, hex |
 | **Память** | Просмотр и запись в окне Memory в Zed |
-| **RTOS** | Задачи FreeRTOS и Zephyr показываются как потоки (через OpenOCD) |
+| **RTOS** | Задачи FreeRTOS, Zephyr и NuttX показываются как потоки (через OpenOCD, pyOCD или J-Link), см. [Задачи RTOS](#задачи-rtos-freertos-zephyr-nuttx) |
 | **Semihosting** | Вывод `printf` в консоль отладки |
 
 ## Как это устроено
@@ -343,6 +344,96 @@ STM32CubeProgrammer находится автоматически в STM32CubeCL
 Готовый пример лежит в [`adapter/tests/firmware`](adapter/tests/firmware). Откройте эту папку в Zed и запустите **Test firmware (QEMU, STM32F405)**. Нужны `arm-none-eabi-gcc`, `make`, `qemu-system-arm` и GDB для ARM.
 </details>
 
+## Задачи RTOS (FreeRTOS, Zephyr, NuttX)
+
+Haltline может показывать задачи RTOS как потоки. Выберите задачу в списке потоков панели отладки, и вы увидите её стек вызовов и переменные. Список задач составляет GDB-сервер, поэтому эта функция включается в настройках сервера. Кроме того, прошивка должна экспортировать символы, которые сервер ищет.
+
+| GDB-сервер | Как включить | FreeRTOS | Zephyr | NuttX |
+|---|---|---|---|---|
+| OpenOCD | параметр `"rtos"` | ✅ | ✅ | ✅ только OpenOCD, собранный из git |
+| pyOCD | включено по умолчанию | ✅ | ✅ | — |
+| J-Link | плагин RTOS в `serverArgs` | ✅ плагин входит в J-Link | ✅ плагин входит в J-Link | ✅ плагин из исходников NuttX |
+| ST-LINK GDB server, st-util, QEMU | не поддерживается | — | — | — |
+
+Общее:
+
+* Имена RTOS в OpenOCD чувствительны к регистру: `FreeRTOS`, `Zephyr`, `nuttx`. С `"auto"` OpenOCD перебирает все известные ему RTOS.
+* Задачи появляются после запуска планировщика. До этого, например при остановке на `main`, поток один.
+* Если задачи не появились, посмотрите сообщения GDB-сервера в консоли отладки. OpenOCD пишет, какого символа не хватает.
+
+### FreeRTOS
+
+```json
+{
+  "label": "FreeRTOS",
+  "adapter": "Haltline",
+  "request": "launch",
+  "executable": "build/app.elf",
+  "device": "STM32F407VG",
+  "rtos": "FreeRTOS"
+}
+```
+
+OpenOCD нужна переменная `uxTopUsedPriority`. В свежих версиях FreeRTOS-Kernel она есть, а в старых нет, например во FreeRTOS из старых пакетов STM32CubeMX. Если в консоли появилось `FreeRTOS: uxTopUsedPriority is not defined`, добавьте в проект файл:
+
+```c
+/* freertos_openocd.c */
+#include "FreeRTOS.h"
+
+const int __attribute__((used)) uxTopUsedPriority = configMAX_PRIORITIES - 1;
+```
+
+Если вы линкуете с `--gc-sections`, добавьте в флаги линкера ещё `-Wl,--undefined=uxTopUsedPriority`, чтобы переменная не выбрасывалась.
+
+### Zephyr
+
+Добавьте в `prj.conf`:
+
+```ini
+CONFIG_DEBUG_THREAD_INFO=y
+```
+
+Эта опция экспортирует сведения о потоках, нужные отладчикам, и включает имена потоков. Затем укажите `"rtos": "Zephyr"` (для OpenOCD). Файл прошивки — `build/zephyr/zephyr.elf`.
+
+### NuttX
+
+* **Нужен OpenOCD, собранный из git.** В последнем релизе OpenOCD 0.12.0 (он и стоит в дистрибутивах Linux) поддержка NuttX устарела и с современным NuttX не работает. У сборки из git `openocd --version` показывает версию вида `0.12.0+dev-…`. Укажите путь к ней в `serverPath`.
+* **NuttX должен экспортировать `g_tcbinfo`.** NuttX 12.4 и новее делает это на Cortex-M всегда. В старых версиях, например 12.0, нужно включить `CONFIG_DEBUG_TCBINFO=y`. Для отладочной информации собирайте с `CONFIG_DEBUG_SYMBOLS=y`.
+
+```json
+{
+  "label": "NuttX",
+  "adapter": "Haltline",
+  "request": "launch",
+  "executable": "nuttx/nuttx",
+  "device": "STM32F407VG",
+  "rtos": "nuttx",
+  "serverPath": "/opt/openocd-git/bin/openocd"
+}
+```
+
+### pyOCD
+
+pyOCD сам находит FreeRTOS и Zephyr, так что с `"serverType": "pyocd"` дополнительные настройки не нужны. Требования к прошивке те же: для Zephyr нужен `CONFIG_DEBUG_THREAD_INFO=y`.
+
+### J-Link
+
+J-Link подключает поддержку RTOS через плагины, которые передаются параметром `-rtos`. Плагины для FreeRTOS и Zephyr входят в пакет J-Link:
+
+```json
+{
+  "label": "J-Link + FreeRTOS",
+  "adapter": "Haltline",
+  "request": "launch",
+  "serverType": "jlink",
+  "device": "STM32F407VG",
+  "executable": "build/app.elf",
+  "serverArgs": ["-rtos", "GDBServer/RTOSPlugin_FreeRTOS"]
+}
+```
+
+Для Zephyr используйте `GDBServer/RTOSPlugin_Zephyr`; ему тоже нужен `CONFIG_DEBUG_THREAD_INFO=y`. Для NuttX соберите плагин из исходников NuttX командой `make -C tools -f Makefile.host jlink-nuttx` и укажите путь к нему: `"serverArgs": ["-rtos", "/path/to/nuttx/tools/jlink-nuttx.so"]` (`.dylib` в macOS, `.dll` в Windows).
+
 ## Справочник настроек
 
 Полная схема с описаниями — в [`debug_adapter_schemas/Haltline.json`](debug_adapter_schemas/Haltline.json). Относительные пути считаются от `cwd`, по умолчанию это корень проекта.
@@ -383,7 +474,7 @@ STM32CubeProgrammer находится автоматически в STM32CubeCL
 | `configFiles` | по `device` | Конфиги OpenOCD (`-f`) |
 | `searchDir` | `[]` | Папки скриптов OpenOCD (`-s`) |
 | `openocdCommands` | `[]` | Дополнительные команды OpenOCD (`-c`) |
-| `rtos` | — | Поддержка RTOS в OpenOCD: `auto`, `FreeRTOS`, `Zephyr`, … |
+| `rtos` | — | Поддержка RTOS в OpenOCD: `FreeRTOS`, `Zephyr`, `nuttx`, `auto`, … (регистр важен), см. [Задачи RTOS](#задачи-rtos-freertos-zephyr-nuttx) |
 | `targetId` | по `device` | Имя цели pyOCD |
 | `machine` | `netduinoplus2` | Машина QEMU |
 | `stm32cubeprogrammer` | авто | Папка `bin` STM32CubeProgrammer для ST-LINK GDB server |
