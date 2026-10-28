@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "haltline-dap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "haltline-zed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "zed_extension_api",
