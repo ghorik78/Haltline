@@ -134,6 +134,18 @@ impl MiClient {
     }
 
     pub fn cmd_timeout(&self, command: &str, timeout: Duration) -> Result<MiResponse, MiError> {
+        let pending = self.send(command)?;
+        match pending.poll(timeout)? {
+            Some(resp) => Ok(resp),
+            None => {
+                pending.abandon();
+                Err(MiError::Timeout(command.to_string()))
+            }
+        }
+    }
+
+    /// Writes a command and returns without waiting for its result.
+    pub fn send(&self, command: &str) -> Result<PendingCommand, MiError> {
         if !self.is_alive() {
             return Err(MiError::Exited);
         }
@@ -160,22 +172,12 @@ impl MiClient {
                 return Err(MiError::Io(e.to_string()));
             }
         }
-        match rx.recv_timeout(timeout) {
-            Ok(mut resp) => {
-                resp.seq_start = seq_start;
-                if resp.class == "error" {
-                    let msg = resp.body.str("msg").unwrap_or("unknown GDB error");
-                    Err(MiError::Gdb(msg.to_string()))
-                } else {
-                    Ok(resp)
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.shared.state.lock().unwrap().pending.remove(&token);
-                Err(MiError::Timeout(command.to_string()))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(MiError::Exited),
-        }
+        Ok(PendingCommand {
+            rx,
+            token,
+            seq_start,
+            shared: self.shared.clone(),
+        })
     }
 
     /// Writes a command without waiting for its result (used for `-gdb-exit`).
@@ -184,6 +186,55 @@ impl MiClient {
         let _ = writer
             .write_all(format!("{}\n", command.trim_end()).as_bytes())
             .and_then(|_| writer.flush());
+    }
+}
+
+/// A command sent with [`MiClient::send`] whose result has not arrived yet.
+pub struct PendingCommand {
+    rx: mpsc::Receiver<MiResponse>,
+    token: u32,
+    seq_start: u64,
+    shared: Arc<Shared>,
+}
+
+impl PendingCommand {
+    /// Waits up to `timeout` for the result. `Ok(None)` means it has not
+    /// arrived yet; the command stays pending.
+    pub fn poll(&self, timeout: Duration) -> Result<Option<MiResponse>, MiError> {
+        let received = if timeout.is_zero() {
+            self.rx.try_recv().map_err(|e| match e {
+                mpsc::TryRecvError::Empty => None,
+                mpsc::TryRecvError::Disconnected => Some(MiError::Exited),
+            })
+        } else {
+            self.rx.recv_timeout(timeout).map_err(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => None,
+                mpsc::RecvTimeoutError::Disconnected => Some(MiError::Exited),
+            })
+        };
+        match received {
+            Ok(mut resp) => {
+                resp.seq_start = self.seq_start;
+                if resp.class == "error" {
+                    let msg = resp.body.str("msg").unwrap_or("unknown GDB error");
+                    Err(MiError::Gdb(msg.to_string()))
+                } else {
+                    Ok(Some(resp))
+                }
+            }
+            Err(None) => Ok(None),
+            Err(Some(e)) => Err(e),
+        }
+    }
+
+    /// Stops waiting; a late result is dropped.
+    pub fn abandon(self) {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .remove(&self.token);
     }
 }
 

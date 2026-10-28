@@ -382,7 +382,18 @@ fn registers_peripherals_memory_and_disassembly() {
 #[test]
 fn faults_watchpoints_restart_and_pause() {
     let Some(tools) = tools() else { return };
-    let mut c = launch(&tools, json!({}));
+    // Loading through GDB (off by default for QEMU) exercises the flashing
+    // progress and the verification with the real GDB.
+    let mut c = launch(
+        &tools,
+        json!({"loadImage": true, "verifyAfterLoad": true, "reloadOnRestart": true}),
+    );
+    assert!(
+        c.output().contains("Flashing firmware.elf ("),
+        "{}",
+        c.output()
+    );
+    assert!(c.output().contains("Loaded and verified"), "{}", c.output());
     let filters = c.request("setExceptionBreakpoints", json!({"filters": ["faults"]}));
     assert_eq!(filters["breakpoints"][0]["verified"], true);
     finish_config(&mut c, &[]);

@@ -14,7 +14,8 @@ mod tests;
 use crate::config::{Config, RequestKind, ServerType};
 use crate::dap::{Category, DapWriter, Request};
 use crate::disasm::DisasmCache;
-use crate::mi::client::{MiClient, MiEvent, MiResponse};
+use crate::flash::{self, FlashProgress};
+use crate::mi::client::{MiClient, MiError, MiEvent, MiResponse};
 use crate::mi::{AsyncKind, StreamKind, Value as Mi};
 use crate::server::{self, ManagedProcess, ServerCommand, ServerEvent};
 use crate::svd::Device;
@@ -150,6 +151,8 @@ pub struct Session {
     gdb_child: Option<Child>,
     server: Option<ManagedProcess>,
     shutting_down: bool,
+    /// The client asked to stop while a launch command was running.
+    cancelled: bool,
     exit_loop: bool,
     terminated_sent: bool,
     lines_start_at1: bool,
@@ -180,6 +183,8 @@ pub struct Session {
 }
 
 const GDB_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How often output is forwarded while a long command runs.
+const PUMP_INTERVAL: Duration = Duration::from_millis(50);
 
 impl Session {
     pub fn new(out: Box<dyn Write + Send>, backend: Box<dyn Backend>) -> (Self, Sender<Event>) {
@@ -196,6 +201,7 @@ impl Session {
             gdb_child: None,
             server: None,
             shutting_down: false,
+            cancelled: false,
             exit_loop: false,
             terminated_sent: false,
             lines_start_at1: true,
@@ -331,10 +337,23 @@ impl Session {
     /// Runs a GDB CLI command and returns its console output.
     fn cli(&mut self, cmd: &str, timeout: Duration) -> Result<String> {
         let was_stopped = self.state == TargetState::Stopped;
-        let resp = self.mi_timeout(
-            &format!("-interpreter-exec console {}", mi_quote(cmd)),
-            timeout,
-        )?;
+        let resp = self.mi_timeout(&cli_command(cmd), timeout)?;
+        Ok(self.after_cli(was_stopped, resp))
+    }
+
+    /// Like [`Session::cli`], but forwards output while the command runs.
+    fn cli_pumped(
+        &mut self,
+        cmd: &str,
+        timeout: Duration,
+        progress: Option<&mut FlashProgress>,
+    ) -> Result<String> {
+        let was_stopped = self.state == TargetState::Stopped;
+        let resp = self.mi_pumped(&cli_command(cmd), timeout, progress)?;
+        Ok(self.after_cli(was_stopped, resp))
+    }
+
+    fn after_cli(&mut self, was_stopped: bool, resp: MiResponse) -> String {
         if was_stopped {
             self.note_side_effects(&resp);
         }
@@ -342,7 +361,78 @@ impl Session {
             self.state = TargetState::Running;
             self.on_external_resume();
         }
-        Ok(resp.console)
+        resp.console
+    }
+
+    /// Runs an MI command that may take long (flashing, resets). Output of
+    /// GDB and the GDB server is forwarded while it runs instead of after,
+    /// `+download` records feed `progress`, and a `terminate`/`disconnect`
+    /// request aborts the command.
+    fn mi_pumped(
+        &mut self,
+        cmd: &str,
+        timeout: Duration,
+        mut progress: Option<&mut FlashProgress>,
+    ) -> Result<MiResponse> {
+        let pending = self.gdb()?.send(cmd)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.pump_events(progress.as_deref_mut());
+            if self.cancelled {
+                pending.abandon();
+                self.shutdown_processes();
+                bail!("stopped by the user");
+            }
+            if let Some(p) = progress.as_deref_mut() {
+                for line in p.tick(Instant::now()) {
+                    self.console(&line);
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                pending.abandon();
+                return Err(MiError::Timeout(cmd.to_string()).into());
+            }
+            if let Some(resp) = pending.poll(remaining.min(PUMP_INTERVAL))? {
+                // Output printed before the result goes out before it.
+                self.pump_events(progress);
+                return Ok(resp);
+            }
+        }
+    }
+
+    /// Forwards queued output; other events wait for the main loop.
+    fn pump_events(&mut self, mut progress: Option<&mut FlashProgress>) {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                Event::Server(ServerEvent::Line { text, stderr }) => {
+                    self.forward_server_line(&text, stderr)
+                }
+                Event::Mi(MiEvent::Stream { kind, text, .. }) => {
+                    self.forward_gdb_stream(kind, &text)
+                }
+                Event::Mi(MiEvent::Other(text)) => self.forward_gdb_other(&text),
+                Event::Mi(MiEvent::Async {
+                    kind: AsyncKind::Status,
+                    class,
+                    body,
+                    ..
+                }) if class == "download" => {
+                    if let Some(p) = progress.as_deref_mut() {
+                        for line in p.on_download(&body, Instant::now()) {
+                            self.console(&line);
+                        }
+                    }
+                }
+                Event::Dap(msg) => {
+                    if matches!(msg["command"].as_str(), Some("terminate" | "disconnect")) {
+                        self.cancelled = true;
+                    }
+                    self.deferred.push_back(Event::Dap(msg));
+                }
+                other => self.deferred.push_back(other),
+            }
+        }
     }
 
     /// Remembers async records produced while an evaluation was running
@@ -886,24 +976,74 @@ impl Session {
     }
 
     fn run_commands(&mut self, commands: &[String]) -> Result<()> {
+        let timeout = Duration::from_secs(30);
         for cmd in commands {
-            let timeout = if cmd.trim() == "load" || cmd.starts_with("load ") {
-                Duration::from_millis(self.config.load_timeout.unwrap_or(180_000))
-            } else {
-                Duration::from_secs(30)
-            };
             let cmd = cmd.trim();
-            let output = if let Some(raw) = cmd.strip_prefix('-') {
-                let resp = self.mi_timeout(&format!("-{raw}"), timeout)?;
-                resp.console
+            if cmd == "load" || cmd.starts_with("load ") {
+                self.load(cmd)?;
+                continue;
+            }
+            let output = if cmd.starts_with('-') {
+                self.mi_pumped(cmd, timeout, None)?.console
             } else {
-                self.cli(cmd, timeout)
+                self.cli_pumped(cmd, timeout, None)
                     .with_context(|| format!("command `{cmd}` failed"))?
             };
             if !output.trim().is_empty() {
                 self.out.output(Category::Console, &output);
             }
         }
+        Ok(())
+    }
+
+    /// Flashes the target, printing the stages as they happen. A bare `load`
+    /// uses `-target-download`, which reports progress; `load FILE` does not.
+    fn load(&mut self, cmd: &str) -> Result<()> {
+        let timeout = Duration::from_millis(self.config.load_timeout.unwrap_or(180_000));
+        let has_flash = self.config.server_type != ServerType::Qemu;
+        let start = Instant::now();
+        let elf = self.config.executable_path();
+        let tracked = cmd == "load" && elf.is_some();
+        let mut progress = if tracked {
+            let elf = elf.as_deref().unwrap_or(Path::new(""));
+            let total = flash::loadable_size(elf).unwrap_or(0);
+            let name = elf
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let size = if total > 0 {
+                format!(" ({})", flash::format_size(total))
+            } else {
+                String::new()
+            };
+            self.console(&format!("Flashing {name}{size}"));
+            FlashProgress::new(total, has_flash, start)
+        } else {
+            self.console(&format!("Flashing: {cmd}"));
+            FlashProgress::untracked(has_flash, start)
+        };
+        let result = if tracked {
+            self.mi_pumped("-target-download", timeout, Some(&mut progress))
+                .map(|resp| (resp.body, String::new()))
+        } else {
+            let was_stopped = self.state == TargetState::Stopped;
+            self.mi_pumped(&cli_command(cmd), timeout, Some(&mut progress))
+                .map(|resp| (resp.body.clone(), self.after_cli(was_stopped, resp)))
+        };
+        let (body, output) = result.context("flashing failed")?;
+        progress.load_done(&body, Instant::now());
+        if !output.trim().is_empty() {
+            self.out.output(Category::Console, &output);
+        }
+        if self.config.verify_after_load {
+            progress.begin_verify(Instant::now());
+            self.cli_pumped("compare-sections", timeout, Some(&mut progress))
+                .context(
+                    "flash verification failed: the target memory differs from the executable",
+                )?;
+            progress.verify_done(Instant::now());
+        }
+        self.console(&progress.summary(Instant::now()));
         Ok(())
     }
 
@@ -1349,6 +1489,10 @@ enum StepKind {
 }
 
 /// Runs a session over stdin/stdout with real processes.
+fn cli_command(cmd: &str) -> String {
+    format!("-interpreter-exec console {}", mi_quote(cmd))
+}
+
 pub fn run_stdio() {
     let (session, tx) = Session::new(Box::new(std::io::stdout()), Box::new(ProcessBackend));
     Session::spawn_dap_reader(Box::new(std::io::stdin()), tx);

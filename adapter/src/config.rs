@@ -126,6 +126,9 @@ pub struct Config {
     pub load_image: Option<bool>,
     /// Milliseconds allowed for flashing.
     pub load_timeout: Option<u64>,
+    /// Compare the flash with the executable after loading it.
+    #[serde(alias = "verify")]
+    pub verify_after_load: bool,
     pub continue_on_attach: bool,
 
     pub pre_launch_commands: Vec<String>,

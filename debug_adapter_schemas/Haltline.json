@@ -183,6 +183,11 @@
       "default": 180000,
       "description": "Milliseconds allowed for flashing."
     },
+    "verifyAfterLoad": {
+      "type": "boolean",
+      "default": false,
+      "description": "After flashing, compare the target memory with `executable` (GDB `compare-sections`) and fail the launch on a mismatch."
+    },
     "continueOnAttach": {
       "type": "boolean",
       "default": false,

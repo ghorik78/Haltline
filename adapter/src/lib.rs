@@ -7,6 +7,7 @@ pub mod config;
 pub mod cortex;
 pub mod dap;
 pub mod disasm;
+pub mod flash;
 pub mod mi;
 pub mod server;
 pub mod session;

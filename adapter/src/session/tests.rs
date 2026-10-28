@@ -360,7 +360,7 @@ fn launch_runs_the_init_sequence_and_runs_to_main() {
     assert!(pos("-file-exec-and-symbols") < pos("-target-select extended-remote localhost:3333"));
     assert!(pos("-target-select") < pos("monitor arm semihosting enable"));
     assert!(pos("monitor arm semihosting enable") < pos("monitor reset halt"));
-    assert!(pos("monitor reset halt") < pos("console \"load\""));
+    assert!(pos("monitor reset halt") < pos("-target-download"));
     assert!(pos("-break-insert -t \"main\"") < pos("-exec-continue"));
     // The *stopped record produced while connecting is not reported.
     assert_eq!(h.script.count("-exec-continue"), 1);
@@ -425,7 +425,7 @@ fn stop_on_entry_and_attach_do_not_run() {
     assert_eq!(stop["reason"], "pause");
     assert_eq!(stop["description"], "Attached");
     assert_eq!(h.script.count("monitor reset"), 0);
-    assert_eq!(h.script.count("-interpreter-exec console \"load\""), 0);
+    assert_eq!(h.script.count("-target-download"), 0);
 }
 
 #[test]
@@ -775,17 +775,14 @@ fn restart_resets_and_runs_to_main_again() {
     let mut h = Harness::new();
     h.launch(json!({"reloadOnRestart": true}));
     h.start_at_main();
-    let loads = h.script.count("-interpreter-exec console \"load\"");
+    let loads = h.script.count("-target-download");
     let n = h.script.count("-break-insert") + 1;
     h.script.push_stop(&format!(
         "*stopped,reason=\"breakpoint-hit\",disp=\"del\",bkptno=\"{n}\",thread-id=\"1\""
     ));
     h.request("restart", json!({}));
     assert_eq!(h.event("stopped").unwrap()["reason"], "entry");
-    assert_eq!(
-        h.script.count("-interpreter-exec console \"load\""),
-        loads + 1
-    );
+    assert_eq!(h.script.count("-target-download"), loads + 1);
     assert!(h.script.count("monitor reset halt") >= 3);
 }
 
@@ -801,4 +798,112 @@ fn disconnect_shuts_gdb_down() {
         .iter()
         .any(|c| c == "-target-disconnect"));
     assert!(h.script.wait_command("-gdb-exit"));
+}
+
+#[test]
+fn flashing_prints_stages_while_it_runs() {
+    let mut h = Harness::new();
+    h.script.on(|cmd| {
+        if cmd != "-target-download" {
+            return None;
+        }
+        // The server erases the flash before GDB reports anything.
+        std::thread::sleep(Duration::from_millis(600));
+        Some(vec![
+            "+download,{section=\".text\",section-size=\"996\",total-size=\"23660\"}".into(),
+            "@\"semihosting output\\n\"".into(),
+            "^done,address=\"0x08000040\",load-size=\"996\",transferred-bits=\"7968\"".into(),
+        ])
+    });
+    h.launch(json!({}));
+    let out = h.output.clone();
+    let pos = |needle: &str| {
+        out.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` missing in:\n{out}"))
+    };
+    assert!(pos("Flashing fw.elf") < pos("Flashing: erasing flash..."));
+    assert!(pos("Flashing: erasing flash...") < pos("Flashed 996 B in"));
+    assert!(pos("semihosting output") < pos("Flashed 996 B in"));
+    assert_eq!(h.script.count("compare-sections"), 0);
+}
+
+#[test]
+fn verify_after_load_compares_sections() {
+    let mut h = Harness::new();
+    h.launch(json!({"verifyAfterLoad": true}));
+    let cmds = h.script.commands();
+    let pos = |needle: &str| cmds.iter().position(|c| c.contains(needle)).unwrap();
+    assert!(pos("-target-download") < pos("compare-sections"));
+    assert!(h.output.contains("Flashed and verified"), "{}", h.output);
+
+    let mut h = Harness::new();
+    h.script.on(|cmd| {
+        cmd.contains("compare-sections").then(|| {
+            vec![
+                "~\"Section .text, range 0x8000040 -- 0x80003d8: MIS-MATCHED!\\n\"".into(),
+                "^error,msg=\"One or more sections of the target image does not match the loaded file\""
+                    .into(),
+            ]
+        })
+    });
+    h.request("initialize", json!({}));
+    let resp = h.request_raw(
+        "launch",
+        json!({"serverType": "external", "gdbTarget": "localhost:3333",
+               "executable": h.elf.clone(), "gdbPath": "fake", "verifyAfterLoad": true}),
+    );
+    assert_eq!(resp["success"], false);
+    let message = resp["message"].as_str().unwrap();
+    assert!(message.contains("flash verification failed"), "{message}");
+    assert!(message.contains("does not match"), "{message}");
+}
+
+#[test]
+fn terminate_during_flashing_stops_the_session() {
+    let mut h = Harness::new();
+    // GDB never finishes the download.
+    h.script
+        .on(|cmd| (cmd == "-target-download").then(Vec::new));
+    h.request("initialize", json!({}));
+    let send = |h: &mut Harness, command: &str, args: Value| {
+        let seq = h.seq;
+        h.seq += 1;
+        h.tx.send(Event::Dap(
+            json!({"seq": seq, "type": "request", "command": command, "arguments": args}),
+        ))
+        .unwrap();
+        seq
+    };
+    let config = json!({"serverType": "external", "gdbTarget": "localhost:3333",
+                        "executable": h.elf.clone(), "gdbPath": "fake"});
+    let launch = send(&mut h, "launch", config);
+    assert!(h.script.wait_command("-target-download"));
+    let terminate = send(&mut h, "terminate", json!({}));
+    let started = Instant::now();
+    let mut launch_resp = None;
+    let mut terminate_resp = None;
+    while launch_resp.is_none() || terminate_resp.is_none() {
+        let msg = h
+            .next_message(WAIT)
+            .expect("responses to launch and terminate");
+        if msg["type"] == "response" && msg["request_seq"] == launch {
+            launch_resp = Some(msg);
+        } else if msg["type"] == "response" && msg["request_seq"] == terminate {
+            terminate_resp = Some(msg);
+        } else {
+            h.queue.push_back(msg);
+        }
+    }
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let launch_resp = launch_resp.unwrap();
+    assert_eq!(launch_resp["success"], false);
+    assert!(
+        launch_resp["message"]
+            .as_str()
+            .unwrap()
+            .contains("stopped by the user"),
+        "{launch_resp}"
+    );
+    assert_eq!(terminate_resp.unwrap()["success"], true);
+    assert!(h.event("terminated").is_some());
 }
